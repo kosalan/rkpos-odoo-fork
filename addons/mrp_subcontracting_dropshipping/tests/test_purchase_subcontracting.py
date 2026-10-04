@@ -366,6 +366,11 @@ class TestSubcontractingDropshippingFlows(TestMrpSubcontractingCommon, TestStock
         ])
         route_mto = self.env.ref('stock.route_warehouse0_mto')
         route_mto.active = True
+        analytic_plan = self.env['account.analytic.plan'].create({'name': 'Test Plan'})
+        analytic_account = self.env['account.analytic.account'].create({
+            'name': 'Test AA',
+            'plan_id': analytic_plan.id,
+        })
         component = self.env['product.product'].create([{
             'name': 'Common Component',
             'is_storable': True,
@@ -397,12 +402,14 @@ class TestSubcontractingDropshippingFlows(TestMrpSubcontractingCommon, TestStock
                     'name': finished_products[0].name,
                     'product_uom_qty': 2,
                     'product_uom_id': uom_unit.id,
+                    'analytic_distribution': {analytic_account.id: 100},
                 }),
                 Command.create({
                     'product_id': finished_products[1].id,
                     'name': finished_products[1].name,
                     'product_uom_qty': 2,
                     'product_uom_id': uom_unit.id,
+                    'analytic_distribution': {analytic_account.id: 100},
                 }),
             ],
         })
@@ -415,6 +422,7 @@ class TestSubcontractingDropshippingFlows(TestMrpSubcontractingCommon, TestStock
         self.assertTrue(po_vendor)
         self.assertEqual(len(po_vendor.order_line), 1)
         self.assertEqual(sum(po_vendor.order_line.mapped('product_qty')), 4)
+        self.assertEqual(po_vendor.order_line.analytic_distribution, so.order_line[0].analytic_distribution)
         po_vendor.button_confirm()
         self.assertEqual(len(po_vendor.order_line.move_ids), 1)
         self.assertFalse(po_vendor.order_line.move_ids.production_group_id)
@@ -566,3 +574,30 @@ class TestSubcontractingDropshippingFlows(TestMrpSubcontractingCommon, TestStock
         bill.action_post()
         # The AVCO cost must be updated to bill price + component cost = $10 + $2 = $12.
         self.assertAlmostEqual(final_product.standard_price, 12.0, places=2)
+
+    def test_dropshipped_resupply_source_purchase(self):
+        """
+        Dropship the subcontractor to resupply the component.
+        Check that the dropship transfer still refers to the subcontracted PO source.
+        """
+        dropship_route = self.env['stock.route'].search([('name', '=', 'Dropship')], limit=1)
+        self.comp1.route_ids = [Command.link(dropship_route.id)]
+
+        subcontracted_po = self.env['purchase.order'].create({
+            "partner_id": self.subcontractor_partner1.id,
+            "picking_type_id": self.warehouse.in_type_id.id,
+            "order_line": [Command.create({
+                'product_id': self.finished.id,
+                'name': self.finished.name,
+                'product_qty': 1.0,
+            })],
+        })
+        subcontracted_po.button_confirm()
+
+        dropship_po = self.env['purchase.order'].search([('partner_id', '=', self.vendor.id)], limit=1)
+        dropship_po.button_confirm()
+
+        dropship_picking = dropship_po.picking_ids
+        self.assertEqual(dropship_picking.subcontracting_source_purchase_count, 1)
+        action = dropship_picking.action_view_subcontracting_source_purchase()
+        self.assertEqual(self.env[action['res_model']].browse(action['res_id']), subcontracted_po)
